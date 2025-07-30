@@ -5,31 +5,10 @@ import fs from 'fs';
 import { createRequire } from 'module';
 import mammoth from 'mammoth';
 import { spawn } from 'child_process';
-
-
-// Function to transcribe audio from video using Whisper
-async function transcribeAudioFromVideo(videoPath) {
-  return new Promise((resolve, reject) => {
-    const pyPath = path.join(process.cwd(), 'uploads/video_captioning/caption_video.py');
-    const py = spawn('python', [pyPath, videoPath]);
-
-    let data = '';
-    let error = '';
-
-    py.stdout.on('data', (chunk) => {
-      data += chunk.toString();
-    });
-
-    py.stderr.on('data', (chunk) => {
-      error += chunk.toString();
-    });
-
-    py.on('close', (code) => {
-      if (code === 0) resolve(data.trim());
-      else reject(new Error(error || 'Python captioning failed.'));
-    });
-  });
-}
+import Tesseract from 'tesseract.js';
+import fetch from 'node-fetch';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import { v4 as uuidv4 } from 'uuid';
 
 const require = createRequire(import.meta.url);
 const pdfParse = require('pdf-parse');
@@ -50,47 +29,136 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// Optional mock Whisper function
-async function transcribeAudio(filePath) {
-  // In production, replace this with real transcription
-  return `Transcription of audio from: ${path.basename(filePath)}`;
+// Helper function to transcribe audio from video files with Whisper python script
+async function transcribeAudioFromVideo(videoPath) {
+  return new Promise((resolve, reject) => {
+    const pyPath = path.join(process.cwd(), 'uploads/video_captioning/caption_video.py'); // adjust path if needed
+    const py = spawn('python', [pyPath, videoPath]);
+
+    let data = '';
+    let error = '';
+
+    py.stdout.on('data', (chunk) => {
+      data += chunk.toString();
+    });
+
+    py.stderr.on('data', (chunk) => {
+      error += chunk.toString();
+    });
+
+    py.on('close', (code) => {
+      if (code === 0) resolve(data.trim());
+      else reject(new Error(error || 'Python captioning failed.'));
+    });
+  });
+}
+
+// AI Helper: Get AI response from selected model (Groq or Gemini)
+async function getAIResponse(text, selectedModel) {
+  if (selectedModel.toLowerCase().startsWith('gemini')) {
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({ model: selectedModel || 'gemini-1.5-flash' });
+    const response = await model.generateContent([
+      {
+        text: `You are a helpful assistant. Given the following extracted text, help the user understand or summarize it:\n\n"${text}"`,
+      },
+    ]);
+    return response.response.text() || 'Sorry, no reply generated.';
+  } else if (selectedModel.toLowerCase().startsWith('groq')) {
+    const aiRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: selectedModel || 'llama3-8b-8192',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a helpful assistant analyzing extracted document text.',
+          },
+          {
+            role: 'user',
+            content: text,
+          },
+        ],
+        temperature: 0.7,
+        max_tokens: 800,
+      }),
+    });
+
+    if (!aiRes.ok) {
+      const errText = await aiRes.text();
+      throw new Error(`Groq API error: ${aiRes.status} - ${errText}`);
+    }
+    const aiData = await aiRes.json();
+    return aiData.choices?.[0]?.message?.content || 'Sorry, no reply generated.';
+  }
+  // Default no AI response:
+  return null;
 }
 
 router.post('/', upload.array('files'), async (req, res) => {
+  // Optionally get selected model from query, default groq
+  const selectedModel = (req.query.model || 'groq').toLowerCase();
+
   try {
     const fileInfos = await Promise.all(
       req.files.map(async (file) => {
         const ext = path.extname(file.originalname).toLowerCase();
         let parsedText = null;
+        let aiReply = null;
 
+        // PDF Parsing
         if (file.mimetype === 'application/pdf') {
           const dataBuffer = fs.readFileSync(file.path);
           const parsed = await pdfParse(dataBuffer);
           parsedText = parsed.text;
         }
-
+        // Word Document Parsing
         else if (file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
           const result = await mammoth.extractRawText({ path: file.path });
           parsedText = result.value;
         }
-
+        // Plain Text Parsing
         else if (file.mimetype === 'text/plain') {
           parsedText = fs.readFileSync(file.path, 'utf-8');
         }
-
+        // Image OCR Parsing with Tesseract
         else if (file.mimetype.startsWith('image/')) {
-          parsedText = null; // No parsing, just preview
+          try {
+            const {
+              data: { text },
+            } = await Tesseract.recognize(file.path, 'eng', {
+              logger: (m) => console.log(m), // optional logging
+            });
+            parsedText = text.trim();
+          } catch (error) {
+            console.error('Tesseract OCR failed:', error);
+            parsedText = '⚠️ OCR failed.';
+          }
+        }
+        // Video Audio Transcription using your existing python based Whisper transcription
+        else if (file.mimetype.startsWith('video/')) {
+          try {
+            const transcript = await transcribeAudioFromVideo(file.path);
+            parsedText = transcript;
+          } catch (err) {
+            console.error('Video audio transcription failed:', err.message);
+            parsedText = '⚠️ Video transcription failed.';
+          }
         }
 
-        else if (file.mimetype.startsWith('video/')) {
-  try {
-    const transcript = await transcribeAudioFromVideo(file.path);
-    parsedText = transcript;
-  } catch (err) {
-    console.error('Whisper transcription failed:', err.message);
-    parsedText = '⚠️ Audio transcription failed.';
-  }
-}
+        // Pass parsed text to AI (optional, only if text extracted)
+        if (parsedText && parsedText.length > 10) {
+          try {
+            aiReply = await getAIResponse(parsedText, selectedModel);
+          } catch (err) {
+            console.error('AI processing failed:', err);
+            aiReply = '⚠️ AI processing failed.';
+          }
+        }
 
         return {
           filename: file.filename,
@@ -99,16 +167,17 @@ router.post('/', upload.array('files'), async (req, res) => {
           size: file.size,
           url: `/uploads/${file.filename}`,
           content: parsedText,
+          ai_response: aiReply,
         };
       })
     );
 
     res.status(200).json({
-      message: 'Files uploaded and parsed successfully',
+      message: 'Files uploaded, parsed, and processed successfully',
       files: fileInfos,
     });
   } catch (error) {
-    console.error('Upload error:', error);
+    console.error('Upload & processing error:', error);
     res.status(500).json({ message: 'Upload failed', error });
   }
 });

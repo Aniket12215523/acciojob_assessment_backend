@@ -21,6 +21,8 @@
     'llama3-70b-8192',
     'gemma-7b-it',
     'mixtral-8x7b-32768',
+    'gemini-1.5-flash', 
+    'gemini-2.0-flash'
     ],
     required: true
     },
@@ -31,7 +33,7 @@
     },
     chatHistory: [
       {
-        role: { type: String, enum: ['user', 'ai'], required: true },
+        role: { type: String, enum: ['user', 'ai', 'bot'], required: true },
         content: { type: String, required: true },
       },
     ],
