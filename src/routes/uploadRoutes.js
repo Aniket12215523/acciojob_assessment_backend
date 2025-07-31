@@ -5,10 +5,14 @@ import fs from 'fs';
 import { createRequire } from 'module';
 import mammoth from 'mammoth';
 import { spawn } from 'child_process';
+import Tesseract from 'tesseract.js';
 import fetch from 'node-fetch';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { v4 as uuidv4 } from 'uuid';
 
+const require = createRequire(import.meta.url);
 const pdfParse = require('pdf-parse');
+
 const router = express.Router();
 
 const uploadDir = path.join(process.cwd(), 'uploads');
@@ -25,26 +29,23 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// --- NEW: Helper function for OCR microservice ---
-import axios from 'axios';
-import FormData from 'form-data';
-
-async function getOcrTextFromMicroservice(imagePath) {
-  const form = new FormData();
-  form.append('image', fs.createReadStream(imagePath));
-  const res = await axios.post('http://localhost:5003/ocr', form, { headers: form.getHeaders() });
-  return res.data.text;
-}
-
-// Existing helper for video audio transcription
+// Helper function to transcribe audio from video files with Whisper python script
 async function transcribeAudioFromVideo(videoPath) {
   return new Promise((resolve, reject) => {
     const pyPath = path.join(process.cwd(), 'uploads/video_captioning/caption_video.py'); // adjust path if needed
     const py = spawn('python', [pyPath, videoPath]);
+
     let data = '';
     let error = '';
-    py.stdout.on('data', (chunk) => { data += chunk.toString(); });
-    py.stderr.on('data', (chunk) => { error += chunk.toString(); });
+
+    py.stdout.on('data', (chunk) => {
+      data += chunk.toString();
+    });
+
+    py.stderr.on('data', (chunk) => {
+      error += chunk.toString();
+    });
+
     py.on('close', (code) => {
       if (code === 0) resolve(data.trim());
       else reject(new Error(error || 'Python captioning failed.'));
@@ -52,13 +53,15 @@ async function transcribeAudioFromVideo(videoPath) {
   });
 }
 
-// Existing AI helper
+// AI Helper: Get AI response from selected model (Groq or Gemini)
 async function getAIResponse(text, selectedModel) {
   if (selectedModel.toLowerCase().startsWith('gemini')) {
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
     const model = genAI.getGenerativeModel({ model: selectedModel || 'gemini-1.5-flash' });
     const response = await model.generateContent([
-      { text: `You are a helpful assistant. Given the following extracted text, help the user understand or summarize it:\n\n"${text}"` },
+      {
+        text: `You are a helpful assistant. Given the following extracted text, help the user understand or summarize it:\n\n"${text}"`,
+      },
     ]);
     return response.response.text() || 'Sorry, no reply generated.';
   } else if (selectedModel.toLowerCase().startsWith('groq')) {
@@ -71,13 +74,20 @@ async function getAIResponse(text, selectedModel) {
       body: JSON.stringify({
         model: selectedModel || 'llama3-8b-8192',
         messages: [
-          { role: 'system', content: 'You are a helpful assistant analyzing extracted document text.' },
-          { role: 'user', content: text },
+          {
+            role: 'system',
+            content: 'You are a helpful assistant analyzing extracted document text.',
+          },
+          {
+            role: 'user',
+            content: text,
+          },
         ],
         temperature: 0.7,
         max_tokens: 800,
       }),
     });
+
     if (!aiRes.ok) {
       const errText = await aiRes.text();
       throw new Error(`Groq API error: ${aiRes.status} - ${errText}`);
@@ -85,11 +95,10 @@ async function getAIResponse(text, selectedModel) {
     const aiData = await aiRes.json();
     return aiData.choices?.[0]?.message?.content || 'Sorry, no reply generated.';
   }
-  // Default no AI response
+  // Default no AI response:
   return null;
 }
 
-// --- THE ACTUAL UPLOAD ROUTE ---
 router.post('/', upload.array('files'), async (req, res) => {
   // Optionally get selected model from query, default groq
   const selectedModel = (req.query.model || 'groq').toLowerCase();
@@ -116,16 +125,21 @@ router.post('/', upload.array('files'), async (req, res) => {
         else if (file.mimetype === 'text/plain') {
           parsedText = fs.readFileSync(file.path, 'utf-8');
         }
-        // --------- IMAGE OCR PARSING (UPDATED) ---------
+        // Image OCR Parsing with Tesseract
         else if (file.mimetype.startsWith('image/')) {
           try {
-            parsedText = await getOcrTextFromMicroservice(file.path);
+            const {
+              data: { text },
+            } = await Tesseract.recognize(file.path, 'eng', {
+              logger: (m) => console.log(m), // optional logging
+            });
+            parsedText = text.trim();
           } catch (error) {
-            console.error('OCR microservice failed:', error);
-            parsedText = '⚠️ OCR microservice failed.';
+            console.error('Tesseract OCR failed:', error);
+            parsedText = '⚠️ OCR failed.';
           }
         }
-        // Video Audio Transcription using Whisper (LEAVE THIS)
+        // Video Audio Transcription using your existing python based Whisper transcription
         else if (file.mimetype.startsWith('video/')) {
           try {
             const transcript = await transcribeAudioFromVideo(file.path);
@@ -136,7 +150,7 @@ router.post('/', upload.array('files'), async (req, res) => {
           }
         }
 
-        // Pass parsed text to AI (if text extracted)
+        // Pass parsed text to AI (optional, only if text extracted)
         if (parsedText && parsedText.length > 10) {
           try {
             aiReply = await getAIResponse(parsedText, selectedModel);
