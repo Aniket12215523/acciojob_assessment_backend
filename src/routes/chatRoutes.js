@@ -1,163 +1,125 @@
 import express from 'express';
-import axios from 'axios';
+import fetch from 'node-fetch';
 import { v4 as uuidv4 } from 'uuid';
-import ChatSession from '../models/ChatSession.js';
-import dotenv from 'dotenv';
-
-dotenv.config();
+import Session from '../models/sessionModel.js';
 
 const router = express.Router();
 
-// GROQ AI
-async function getAIResponse(messages, selectedModel) {
-  try {
-    const response = await axios.post(
-      'https://api.groq.com/openai/v1/chat/completions',
-      {
-        model: selectedModel || 'llama3-70b-8192',
-        messages: messages,
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-    // console.log("GROQ_API_KEY:", process.env.GROQ_API_KEY?.slice(0, 5)); 
-    return response.data.choices[0].message.content;
-  } catch (error) {
-    console.error('Error getting AI response:', error.response?.data || error.message);
-    return "Sorry, the assistant is currently unavailable.";
+// Chat-optimized models (faster for conversations)
+const CHAT_MODELS = [
+  'llama-3.1-8b-instant',         // Fastest for chat
+  'llama-3.3-70b-versatile',      // Better quality fallback
+  'openai/gpt-oss-20b'            // Final fallback
+];
+
+async function callChatAPI(messages, modelIndex = 0) {
+  if (modelIndex >= CHAT_MODELS.length) {
+    throw new Error('All chat models exhausted');
   }
-}
 
-/*
-// ORIGINAL OpenRouter version 
-async function getAIResponse(messages, selectedModel) {
+  const model = CHAT_MODELS[modelIndex];
+  
   try {
-    const response = await axios.post(
-      'https://openrouter.ai/api/v1/chat/completions',
-      {
-        model: selectedModel || 'openai/gpt-3.5-turbo',
-        messages: messages,
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+        'Content-Type': 'application/json',
       },
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    return response.data.choices[0].message.content;
-  } catch (error) {
-    console.error('Error getting AI response:', error.response?.data || error.message);
-    return "Sorry, the assistant is currently unavailable.";
-  }
-}
-*/
-
-/*
-// ORIGINAL OpenAI version 
-async function getAIResponse(messages, selectedModel) {
-  try {
-    const response = await axios.post(
-      'https://api.openai.com/v1/chat/completions',
-      {
-        model: selectedModel || 'gpt-3.5-turbo',
+      body: JSON.stringify({
+        model: model,
         messages: messages,
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    return response.data.choices[0].message.content;
-  } catch (error) {
-    console.error('Error getting AI response:', error.response?.data || error.message);
-    return "Sorry, the assistant is currently unavailable.";
-  }
-}
-*/
-
-// Send message and store chat
-router.post('/send', async (req, res) => {
-  const { sessionId, message, selectedModel, userId } = req.body;
-
-  try {
-    let session = await ChatSession.findOne({ sessionId });
-
-    if (!session) {
-      session = new ChatSession({
-        sessionId: sessionId || uuidv4(),
-        userId, 
-        selectedModel,
-        name: 'New Chat',
-        messages: [],
-      });
-    }
-
-    if (session.name === 'New Chat' && session.messages.length === 0) {
-      session.name = message.trim().slice(0, 50); 
-    }
-
-    session.selectedModel = selectedModel;
-    session.messages.push({ sender: 'user', message });
-
-    const formattedMessages = session.messages.map(msg => ({
-      role: msg.sender === 'user' ? 'user' : 'assistant',
-      content: msg.message,
-    }));
-
-    const aiReply = await getAIResponse(formattedMessages, selectedModel);
-    session.messages.push({ sender: 'assistant', message: aiReply });
-
-    await session.save();
-
-    res.status(200).json({
-      sessionId: session.sessionId,
-      response: aiReply,
-      history: session.messages,
-      name: session.name,
+        max_tokens: 2048,
+        temperature: 0.8
+      }),
     });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      const error = new Error(`HTTP ${response.status}: ${response.statusText}`);
+      error.response = { status: response.status, data: errorData };
+      throw error;
+    }
+
+    const data = await response.json();
+    return {
+      success: true,
+      data: data,
+      modelUsed: model
+    };
+
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error(`Chat model ${model} failed:`, error.message);
+
+    // Retry conditions
+    if (error.response?.status === 429 || 
+        error.response?.status === 503 || 
+        error.response?.status === 502 ||
+        error.code === 'ECONNABORTED') {
+      
+      console.log(`Attempting chat fallback to next model...`);
+      return await callChatAPI(messages, modelIndex + 1);
+    }
+
+    throw error;
   }
-});
+}
 
-// GET all ChatSessions for a user
-router.get('/user/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const sessions = await ChatSession.find({ userId }).sort({ updatedAt: -1 });
-    res.status(200).json({ sessions });
-  } catch (err) {
-    console.error('Error fetching ChatSessions:', err.message);
-    res.status(500).json({ error: 'Failed to fetch sessions' });
+router.post('/send', async (req, res) => {
+  const { sessionId, message } = req.body;
+
+  if (!sessionId || !message) {
+    return res.status(400).json({ error: 'sessionId and message are required' });
   }
-});
-
-// Chat history
-router.get('/history/:sessionId', async (req, res) => {
-  const { sessionId } = req.params;
 
   try {
-    const session = await ChatSession.findOne({ sessionId });
+    const session = await Session.findById(sessionId);
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    res.status(200).json({
-      sessionId: session.sessionId,
-      selectedModel: session.selectedModel,
-      messages: session.messages
+    // Build conversation context (last 10 messages for context)
+    const recentHistory = session.chatHistory.slice(-10);
+    const messages = [
+      { role: 'system', content: 'You are a helpful AI assistant. Provide concise, accurate, and friendly responses.' },
+      ...recentHistory.map(msg => ({ role: msg.role === 'ai' ? 'assistant' : msg.role, content: msg.content })),
+      { role: 'user', content: message }
+    ];
+
+    const result = await callChatAPI(messages);
+    
+    if (!result.success) {
+      throw new Error('All chat models failed');
+    }
+
+    const aiReply = result.data.choices?.[0]?.message?.content || 'I apologize, but I could not generate a response.';
+
+    session.chatHistory.push(
+      { id: uuidv4(), role: 'user', content: message },
+      { id: uuidv4(), role: 'assistant', content: aiReply }
+    );
+
+    session.lastEditedAt = new Date();
+    await session.save();
+
+    res.status(200).json({ 
+      reply: aiReply, 
+      messages: session.chatHistory,
+      modelUsed: result.modelUsed
     });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+
+  } catch (err) {
+    console.error('Message send error:', err.message);
+    
+    if (err.response?.status === 401) {
+      return res.status(401).json({ error: 'Invalid API key. Please check your Groq configuration.' });
+    } else if (err.response?.status === 429) {
+      return res.status(429).json({ error: 'Rate limit exceeded. Please try again shortly.' });
+    } else if (err.message === 'All chat models exhausted') {
+      return res.status(503).json({ error: 'Sorry, the assistant is currently unavailable. Please try again later.' });
+    }
+    
+    res.status(500).json({ error: 'Failed to get response from AI' });
   }
 });
 

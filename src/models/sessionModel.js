@@ -1,52 +1,54 @@
-  import mongoose from 'mongoose';
+import mongoose from 'mongoose';
 
-  const sessionSchema = new mongoose.Schema({
-    userId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
-      required: true,
-    },
-    title: {
-      type: String,
-      default: 'Untitled Session',
-    },
-   model: {
-  type: String,
-  enum: [
-    'gpt-3.5-turbo',
-    'gpt-4',
-    'gpt-4o',             
-    'mistral',
-    'llama3-8b-8192',
-    'llama3-70b-8192',
-    'gemma-7b-it',
-    'mixtral-8x7b-32768',
-    'gemini-1.5-flash', 
-    'gemini-2.0-flash'
+const sessionSchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+  },
+  title: {
+    type: String,
+    default: 'Untitled Session',
+  },
+  model: {
+    type: String,
+    enum: [
+      // Current Groq Models (October 2025)
+      'llama-3.1-8b-instant',
+      'llama-3.3-70b-versatile', 
+      'openai/gpt-oss-120b',
+      'openai/gpt-oss-20b',
+      'meta-llama/llama-4-maverick-17b-128e-instruct',
+      'qwen/qwen3-32b',
+      
+      // Legacy support (will be removed)
+      'llama3-8b-8192',
+      'mixtral-8x7b-32768',
+      'gemma-7b-it',
+      'gemini-1.5-flash',
+      'gemini-2.0-flash'
     ],
     required: true
-    },
-
-    memory: {
+  },
+  memory: {
     type: String,
     default: '',
+  },
+  chatHistory: [
+    {
+      role: { type: String, enum: ['user', 'ai', 'assistant', 'bot'], required: true },
+      content: { type: String, required: true },
     },
-    chatHistory: [
-      {
-        role: { type: String, enum: ['user', 'ai', 'bot'], required: true },
-        content: { type: String, required: true },
-      },
-    ],
-    generatedCode: {
-      jsx: { type: String, default: '' },
-      css: { type: String, default: '' },
-    },
-    lastEditedAt: {
-      type: Date,
-      default: Date.now,
-    },
-  }, { timestamps: true });
+  ],
+  generatedCode: {
+    jsx: { type: String, default: '' },
+    css: { type: String, default: '' },
+  },
+  lastEditedAt: {
+    type: Date,
+    default: Date.now,
+  },
+}, { timestamps: true });
 
 const Session = mongoose.models.Session || mongoose.model('Session', sessionSchema);
 export default Session;
-

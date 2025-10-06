@@ -24,7 +24,7 @@ const app = express();
 app.use(cors({
   origin: [
     'https://acciojob-assessment-frontend.vercel.app',
-    'http://localhost:3000'
+    'http://localhost:5173'
   ],
   credentials: true, 
 }));
